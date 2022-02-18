@@ -14,10 +14,12 @@ class ZeroPad3d(nn.ConstantPad3d):
         super(ZeroPad3d, self).__init__(padding,0)
 
 class ApsPool3d(nn.Module):
-    def __init__(self, channels, pad_type='circular', filt_size=3, stride=2, apspool_criterion = 'l2', 
-                return_poly_indices = True, circular_flag = True, N = None):
+    def __init__(self, channels, pad_type='zero', filt_size=3, stride=2, apspool_criterion='l2',
+                return_poly_indices=False, N=None):
         super(ApsPool3d, self).__init__()
         
+        if stride > 2:
+            raise NotImplementedError("original authors only worked out stride==2")
         self.filt_size = filt_size
         self.pad_sizes = [int(1.*(filt_size-1)/2), int(np.ceil(1.*(filt_size-1)/2))] * 3
         self.stride = stride
@@ -38,7 +40,7 @@ class ApsPool3d(nn.Module):
         self.pad = get_pad_layer_3d(pad_type)(self.pad_sizes)
         
         if self.N is not None:
-            self.permute_indices = permute_polyphase(N, stride = 2).cuda()
+            self.permute_indices = permute_polyphase_3d(N)
             
         else:
             self.permute_indices = None
@@ -55,22 +57,20 @@ class ApsPool3d(nn.Module):
             inp = input_to_pool
             polyphase_indices = None
 
-        if(self.filt_size==1):
-            return aps_downsample_3d(aps_pad(inp), self.stride, polyphase_indices, return_poly_indices=self.return_poly_indices, permute_indices=self.permute_indices, apspool_criterion=self.apspool_criterion)
-            
+        if(self.filt_size == 1):
+            return aps_downsample_3d(aps_pad_3d(inp), self.stride, polyphase_indices, return_poly_indices=self.return_poly_indices, permute_indices=self.permute_indices, apspool_criterion=self.apspool_criterion)
         else:
-            
             blurred_inp = F.conv3d(self.pad(inp), self.filt, stride=1, groups=inp.shape[1])
-            return aps_downsample_3d(aps_pad(blurred_inp), self.stride, polyphase_indices, return_poly_indices=self.return_poly_indices, permute_indices=self.permute_indices, apspool_criterion=self.apspool_criterion)
-        
+            return aps_downsample_3d(aps_pad_3d(blurred_inp), self.stride, polyphase_indices, return_poly_indices=self.return_poly_indices, permute_indices=self.permute_indices, apspool_criterion=self.apspool_criterion)
+
 def get_pad_layer_3d(pad_type):
     if(pad_type in ['refl','reflect']):
         PadLayer = nn.ReflectionPad3d
     elif(pad_type in ['repl','replicate']):
         PadLayer = nn.ReplicationPad3d
-    elif(pad_type == 'zero'):
+    elif pad_type == 'zero':
         PadLayer = ZeroPad3d
-    elif(pad_type == 'circular'):
+    elif pad_type == 'circular':
         PadLayer = circular_pad_3d
     else:
         raise NotImplementedError('Pad type [%s] not recognized'%pad_type)
@@ -138,21 +138,26 @@ def aps_downsample_3d(x, stride, polyphase_indices = None, return_poly_indices =
     
     else:
         B, C, N, _, _ = x.shape
-        N_poly = int(N**2/4)
+        N_poly = int(N**3/8) # number of points per polyphase
         Nb2 = int(N/2)
         
         if permute_indices is None:
-            permute_indices = permute_polyphase(N).long().cuda()
+            permute_indices = permute_polyphase_3d(N).long()
 
+        # Flatten the view of each grid
         x = x.view(B, C, -1)
-        x = torch.index_select(x, dim=2, index=permute_indices).view(B, C, 4, N_poly).permute(0, 2, 1, 3)
+
+        # Select the points that are in each polyphase (in order, so p0,p1,p2,...)
+        # Then order it into polyphase view
+        # Then change the order so shape is (batch, polyphases, channels, voxel_info)
+        x = torch.index_select(x, dim=2, index=permute_indices).view(B, C, 8, N_poly).permute(0, 2, 1, 3)
         
         if polyphase_indices is None:
             
             polyphase_indices = get_polyphase_indices_v2(x, apspool_criterion)
             
-        batch_indices = torch.arange(B).cuda()
-        output = x[batch_indices, polyphase_indices, :, :].view(B, C, Nb2, Nb2)
+        batch_indices = torch.arange(B)
+        output = x[batch_indices, polyphase_indices, :, :].view(B, C, Nb2, Nb2, Nb2)
         
         if return_poly_indices:
             return output, polyphase_indices
@@ -198,11 +203,11 @@ def get_polyphase_indices_v2(x, apspool_criterion):
 #     x has the form (B, 4, C, N_poly) where N_poly corresponds to the reduced version of the 2d feature maps
 
     if apspool_criterion == 'l2':
-        norms = torch.norm(x, dim = (2, 3), p = 2)
+        norms = torch.linalg.norm(x, dim = (2, 3), ord=2)
         polyphase_indices = torch.argmax(norms, dim = 1)
         
     elif apspool_criterion == 'l1':
-        norms = torch.norm(x, dim = (2, 3), p = 1)
+        norms = torch.linalg.norm(x, dim = (2, 3), ord=1)
         polyphase_indices = torch.argmax(norms, dim = 1)
         
     elif apspool_criterion == 'l_infty':
@@ -218,11 +223,11 @@ def get_polyphase_indices_v2(x, apspool_criterion):
         
         
     elif apspool_criterion == 'l2_min':
-        norms = torch.norm(x, dim = (2, 3), p = 2)
+        norms = torch.linalg.norm(x, dim = (2, 3), ord=2)
         polyphase_indices = torch.argmin(norms, dim = 1)
         
     elif apspool_criterion == 'l1_min':
-        norms = torch.norm(x, dim = (2, 3), p = 1)
+        norms = torch.linalg.norm(x, dim = (2, 3), ord=1)
         polyphase_indices = torch.argmin(norms, dim = 1)
         
     else:
@@ -268,6 +273,23 @@ def aps_pad(x):
     
     return x
         
+def aps_pad_3d(x):
+    
+    N1, N2, N3 = x.shape[2:5]
+    
+    if N1%2==0 and N2%2==0 and N3%2==0:
+        return x
+    
+    if N1%2!=0:
+        x = F.pad(x, (0, 0, 0, 0, 0, 1), mode = 'circular')
+    
+    if N2%2!=0:
+        x = F.pad(x, (0, 0, 0, 1, 0, 0), mode = 'circular')
+    
+    if N3%2!=0:
+        x = F.pad(x, (0, 1, 0, 0, 0, 0), mode = 'circular')
+
+    return x
     
     
 def permute_polyphase(N, stride = 2):
@@ -278,16 +300,46 @@ def permute_polyphase(N, stride = 2):
     even_increment = 2*N*torch.arange(int(N/2))[:,None]
     odd_increment = N + 2*N*torch.arange(int(N/2))[:,None]
     
-    p0_indices = (base_even_ind + even_increment).view(-1)
-    p1_indices = (base_even_ind + odd_increment).view(-1)
+    p0_indices = (base_even_ind + even_increment).view(-1) # the filter locations if start from 0,0
+    p1_indices = (base_even_ind + odd_increment).view(-1) # the filter locations if start from 0,1
     
-    p2_indices = (base_odd_ind + even_increment).view(-1)
-    p3_indices = (base_odd_ind + odd_increment).view(-1)
+    p2_indices = (base_odd_ind + even_increment).view(-1) # filter locations if start from 1,0
+    p3_indices = (base_odd_ind + odd_increment).view(-1) # filter locations if start from 1,1
     
     permute_indices = torch.cat([p0_indices, p1_indices, p2_indices, p3_indices], dim = 0)
     
     return permute_indices
 
+def permute_polyphase_3d(N):
+    # In 3d we have 8 polyphase components
+    # shifts for each dimension in {0,1}
+    # therefore # polyphase components == # of bit strings of length 3 = 8
+    
+    base_even_ind = 2*torch.arange(int(N/2))[None, None, :]
+    base_odd_ind = 1 + 2*torch.arange(int(N/2))[None, None, :]
+    
+    even_increment = 2*N*torch.arange(int(N/2))[None, :,None]
+    odd_increment = N + 2*N*torch.arange(int(N/2))[None, :,None]
+    
+    even_square_increment = N ** 2 * 2 *torch.arange(int(N/2))[:, None, None]
+    odd_square_increment =  N**2 * (1 + 2 * torch.arange(int(N/2)))[:, None, None]
+
+    p0_indices = (base_even_ind + even_increment + even_square_increment).view(-1)
+    p1_indices = (base_even_ind + odd_increment + even_square_increment).view(-1)
+
+    p2_indices = (base_odd_ind + even_increment + even_square_increment).view(-1)
+    p3_indices = (base_odd_ind + odd_increment + even_square_increment).view(-1)
+
+    p4_indices = (base_even_ind + even_increment + odd_square_increment).view(-1)
+    p5_indices = (base_even_ind + odd_increment + odd_square_increment).view(-1)
+
+    p6_indices = (base_odd_ind + even_increment + odd_square_increment).view(-1)
+    p7_indices = (base_odd_ind + odd_increment + odd_square_increment).view(-1)
+    
+    permute_indices = torch.cat([p0_indices, p1_indices, p2_indices, p3_indices,
+                    p4_indices, p5_indices, p6_indices, p7_indices], dim=0)
+    
+    return permute_indices
 
 
 
