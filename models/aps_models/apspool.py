@@ -200,39 +200,38 @@ def aps_downsample_v2(x, stride, polyphase_indices = None, return_poly_indices =
         
         
 def get_polyphase_indices_v2(x, apspool_criterion):
-#     x has the form (B, 4, C, N_poly) where N_poly corresponds to the reduced version of the 2d feature maps
+#     x has the form (B, [# of polyphases], C, N_poly) where N_poly corresponds to the reduced version of the 2d feature maps
 
     if apspool_criterion == 'l2':
-        norms = torch.linalg.norm(x, dim = (2, 3), ord=2)
-        polyphase_indices = torch.argmax(norms, dim = 1)
+        norms = torch.linalg.norm(x, dim=(2, 3), ord=2)
+        polyphase_indices = torch.argmax(norms, dim=1)
         
     elif apspool_criterion == 'l1':
-        norms = torch.linalg.norm(x, dim = (2, 3), ord=1)
-        polyphase_indices = torch.argmax(norms, dim = 1)
+        norms = torch.linalg.norm(x, dim=(2, 3), ord=1)
+        polyphase_indices = torch.argmax(norms, dim=1)
         
     elif apspool_criterion == 'l_infty':
-        B = x.shape[0]
-        max_vals = torch.max(x.reshape(B, 4, -1).abs(), dim = 2).values
-        polyphase_indices = torch.argmax(max_vals, dim = 1)
+        B,polys, _, _ = x.shape
+        max_vals = torch.max(x.reshape(B, polys, -1).abs(), dim=2).values
+        polyphase_indices = torch.argmax(max_vals, dim=1)
         
     
     elif apspool_criterion == 'non_abs_max':
-        B = x.shape[0]
-        max_vals = torch.max(x.reshape(B, 4, -1), dim = 2).values
-        polyphase_indices = torch.argmax(max_vals, dim = 1)
+        B,polys, _, _ = x.shape
+        max_vals = torch.max(x.reshape(B, polys, -1), dim=2).values
+        polyphase_indices = torch.argmax(max_vals, dim=1)
         
         
     elif apspool_criterion == 'l2_min':
-        norms = torch.linalg.norm(x, dim = (2, 3), ord=2)
-        polyphase_indices = torch.argmin(norms, dim = 1)
+        norms = torch.linalg.norm(x, dim=(2, 3), ord=2)
+        polyphase_indices = torch.argmin(norms, dim=1)
         
     elif apspool_criterion == 'l1_min':
-        norms = torch.linalg.norm(x, dim = (2, 3), ord=1)
-        polyphase_indices = torch.argmin(norms, dim = 1)
+        norms = torch.linalg.norm(x, dim=(2, 3), ord=1)
+        polyphase_indices = torch.argmin(norms, dim=1)
         
     else:
         raise Exception('Unknown APS criterion')
-        
         
         
     return polyphase_indices
