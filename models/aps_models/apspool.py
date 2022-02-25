@@ -38,11 +38,9 @@ class ApsPool3d(nn.Module):
         self.pad = get_pad_layer_3d(pad_type)(self.pad_sizes)
         
         if self.N is not None:
-            self.register_buffer('_permute_indices',permute_polyphase_3d(N).long())
-            self.permute_indices = self._permute_indices
-            
+            self.register_buffer('permute_indices',permute_polyphase_3d(self.N+self.N%2).long())
         else:
-            self.permute_indices = None
+            self.register_buffer('permute_indices',torch.zeros(48**3).long())
             
             
         
@@ -56,10 +54,10 @@ class ApsPool3d(nn.Module):
             inp = input_to_pool
             polyphase_indices = None
 
-        if self.permute_indices is None:
-            N = inp.shape[2]
-            self.register_buffer('_permute_indices',permute_polyphase_3d(N+N%2).long())
-            self.permute_indices = self._permute_indices
+        if self.N is None:
+            self.N = inp.shape[2]
+            pi = getattr(self,"permute_indices")
+            setattr(self,"permute_indices", permute_polyphase_3d(self.N+self.N%2).long().to(pi.device))
 
         if(self.filt_size == 1):
             return aps_downsample_3d(aps_pad_3d(inp), self.stride, polyphase_indices, return_poly_indices=self.return_poly_indices, permute_indices=self.permute_indices, apspool_criterion=self.apspool_criterion)
@@ -131,7 +129,7 @@ class ApsPool(nn.Module):
             return aps_downsample_v2(aps_pad(blurred_inp), self.stride, polyphase_indices, return_poly_indices = self.return_poly_indices, permute_indices = self.permute_indices, apspool_criterion = self.apspool_criterion)
         
 
-def aps_downsample_3d(x, stride, polyphase_indices = None, return_poly_indices = True, permute_indices = None, apspool_criterion = 'l2',testing=True):
+def aps_downsample_3d(x, stride, polyphase_indices = None, return_poly_indices = True, permute_indices = None, apspool_criterion = 'l2'):
     
     if stride==1:
         return x
@@ -145,8 +143,12 @@ def aps_downsample_3d(x, stride, polyphase_indices = None, return_poly_indices =
         N_poly = int(N**3/8) # number of points per polyphase
         Nb2 = int(N/2)
 
-        if permute_indices is None:
-            permute_indices = permute_polyphase_3d(N).long().cuda()
+        # permute_indices should never be None
+        assert permute_indices is not None
+        # if permute_indices is None:
+        #     permute_indices = permute_polyphase_3d(N).long().cuda()
+        #     self.register_buffer('_permute_indices',permute_polyphase_3d(N+N%2).long())
+        #     self.permute_indices = self._permute_indices
 
         # Flatten the view of each grid
         x = x.view(B, C, -1)
@@ -160,14 +162,11 @@ def aps_downsample_3d(x, stride, polyphase_indices = None, return_poly_indices =
             
             polyphase_indices = get_polyphase_indices_v2(x, apspool_criterion)
             
-        batch_indices = torch.arange(B).cuda()
+        batch_indices = torch.arange(B).to(x.device)
         output = x[batch_indices, polyphase_indices, :, :].view(B, C, Nb2, Nb2, Nb2)
         
-        if testing and return_poly_indices:
-            return x, polyphase_indices
         if return_poly_indices:
             return output, polyphase_indices
-        
         else:
             return output
 
@@ -182,11 +181,13 @@ def aps_downsample_v2(x, stride, polyphase_indices = None, return_poly_indices =
     
     else:
         B, C, N, _ = x.shape
+        print( x.shape)
         N_poly = int(N**2/4)
         Nb2 = int(N/2)
         
         if permute_indices is None:
             permute_indices = permute_polyphase(N).long().cuda()
+            print(permute_indices)
 
         x = x.view(B, C, -1)
         x = torch.index_select(x, dim=2, index = permute_indices).view(B, C, 4, N_poly).permute(0, 2, 1, 3)
@@ -194,6 +195,7 @@ def aps_downsample_v2(x, stride, polyphase_indices = None, return_poly_indices =
         if polyphase_indices is None:
             
             polyphase_indices = get_polyphase_indices_v2(x, apspool_criterion)
+            print(polyphase_indices)
             
         batch_indices = torch.arange(B).cuda()
         output = x[batch_indices, polyphase_indices, :, :].view(B, C, Nb2, Nb2)
@@ -204,12 +206,48 @@ def aps_downsample_v2(x, stride, polyphase_indices = None, return_poly_indices =
         else:
             return output
         
-        
 def get_polyphase_indices_v2(x, apspool_criterion):
+#     x has the form (B, 4, C, N_poly) where N_poly corresponds to the reduced version of the 2d feature maps
+
+    if apspool_criterion == 'l2':
+        norms = torch.norm(x, dim = (2, 3), p = 2)
+        polyphase_indices = torch.argmax(norms, dim = 1)
+        
+    elif apspool_criterion == 'l1':
+        norms = torch.norm(x, dim = (2, 3), p = 1)
+        polyphase_indices = torch.argmax(norms, dim = 1)
+        
+    elif apspool_criterion == 'l_infty':
+        B = x.shape[0]
+        max_vals = torch.max(x.reshape(B, 4, -1).abs(), dim = 2).values
+        polyphase_indices = torch.argmax(max_vals, dim = 1)
+        
+    
+    elif apspool_criterion == 'non_abs_max':
+        B = x.shape[0]
+        max_vals = torch.max(x.reshape(B, 4, -1), dim = 2).values
+        polyphase_indices = torch.argmax(max_vals, dim = 1)
+        
+        
+    elif apspool_criterion == 'l2_min':
+        norms = torch.norm(x, dim = (2, 3), p = 2)
+        polyphase_indices = torch.argmin(norms, dim = 1)
+        
+    elif apspool_criterion == 'l1_min':
+        norms = torch.norm(x, dim = (2, 3), p = 1)
+        polyphase_indices = torch.argmin(norms, dim = 1)
+        
+    else:
+        raise Exception('Unknown APS criterion') 
+
+    return polyphase_indices
+
+def get_polyphase_indices_3d(x, apspool_criterion):
 #     x has the form (B, [# of polyphases], C, N_poly) where N_poly corresponds to the reduced version of the 2d feature maps
 
     if type(apspool_criterion) is str:
         apspool_criterion = [apspool_criterion]
+    x = x[:,:3,:,:]
     B,polys, _,_ = x.shape
     norms = torch.zeros((B,polys))
     if 'l4' in apspool_criterion:
@@ -218,6 +256,8 @@ def get_polyphase_indices_v2(x, apspool_criterion):
         norms += torch.linalg.vector_norm(x, dim=(2, 3), ord=3)
     if 'l2' in apspool_criterion:
         norms += torch.linalg.vector_norm(x, dim=(2, 3), ord=2)
+    if 'l2_mat' in apspool_criterion:
+        norms += torch.linalg.norm(x, dim=(2, 3), ord=2)
     if 'l1' in apspool_criterion:
         norms += torch.linalg.vector_norm(x, dim=(2, 3), ord=1)
     if 'l_infty' in apspool_criterion:
