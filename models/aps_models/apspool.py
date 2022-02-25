@@ -13,7 +13,7 @@ class ZeroPad3d(nn.ConstantPad3d):
 
 class ApsPool3d(nn.Module):
     def __init__(self, channels, pad_type='zero', filt_size=3, stride=2, apspool_criterion='l2',
-                return_poly_indices=False, N=None):
+                return_poly_indices=False, N=None,use_first=False):
         super(ApsPool3d, self).__init__()
         
         if stride > 2:
@@ -27,6 +27,7 @@ class ApsPool3d(nn.Module):
         self.return_poly_indices = return_poly_indices
         
         self.apspool_criterion = apspool_criterion
+        self.use_first = use_first
         
         if self.filt_size > 1:
             a = construct_1d_array(self.filt_size)
@@ -63,7 +64,7 @@ class ApsPool3d(nn.Module):
             return aps_downsample_3d(aps_pad_3d(inp), self.stride, polyphase_indices, return_poly_indices=self.return_poly_indices, permute_indices=self.permute_indices, apspool_criterion=self.apspool_criterion)
         else:
             blurred_inp = F.conv3d(self.pad(inp), self.filt, stride=1, groups=inp.shape[1])
-            return aps_downsample_3d(aps_pad_3d(blurred_inp), self.stride, polyphase_indices, return_poly_indices=self.return_poly_indices, permute_indices=self.permute_indices, apspool_criterion=self.apspool_criterion)
+            return aps_downsample_3d(aps_pad_3d(blurred_inp), self.stride, polyphase_indices, return_poly_indices=self.return_poly_indices, permute_indices=self.permute_indices, apspool_criterion=self.apspool_criterion, use_first=self.use_first)
 
 def get_pad_layer_3d(pad_type):
     if(pad_type in ['refl','reflect']):
@@ -129,7 +130,7 @@ class ApsPool(nn.Module):
             return aps_downsample_v2(aps_pad(blurred_inp), self.stride, polyphase_indices, return_poly_indices = self.return_poly_indices, permute_indices = self.permute_indices, apspool_criterion = self.apspool_criterion)
         
 
-def aps_downsample_3d(x, stride, polyphase_indices = None, return_poly_indices = True, permute_indices = None, apspool_criterion = 'l2'):
+def aps_downsample_3d(x, stride, polyphase_indices = None, return_poly_indices = True, permute_indices = None, apspool_criterion = 'l2',use_first=False):
     
     if stride==1:
         return x
@@ -160,7 +161,7 @@ def aps_downsample_3d(x, stride, polyphase_indices = None, return_poly_indices =
         
         if polyphase_indices is None:
             
-            polyphase_indices = get_polyphase_indices_v2(x, apspool_criterion)
+            polyphase_indices = get_polyphase_indices_3d(x, apspool_criterion,use_first=use_first)
             
         batch_indices = torch.arange(B).to(x.device)
         output = x[batch_indices, polyphase_indices, :, :].view(B, C, Nb2, Nb2, Nb2)
@@ -242,14 +243,16 @@ def get_polyphase_indices_v2(x, apspool_criterion):
 
     return polyphase_indices
 
-def get_polyphase_indices_3d(x, apspool_criterion):
+def get_polyphase_indices_3d(x, apspool_criterion, use_first=False):
 #     x has the form (B, [# of polyphases], C, N_poly) where N_poly corresponds to the reduced version of the 2d feature maps
 
     if type(apspool_criterion) is str:
         apspool_criterion = [apspool_criterion]
-    x = x[:,:3,:,:]
     B,polys, _,_ = x.shape
-    norms = torch.zeros((B,polys))
+    # Only use the first channel of the image
+    if use_first:
+        x = x[:,:,0,:].unsqueeze(2)
+    norms = torch.zeros((B,polys)).to(x.device)
     if 'l4' in apspool_criterion:
         norms += torch.linalg.vector_norm(x, dim=(2, 3), ord=4)
     if 'l3' in apspool_criterion:
